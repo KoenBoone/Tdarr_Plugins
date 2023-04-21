@@ -9,8 +9,9 @@ const details = () => ({
                   Settings are dependant on file bitrate
                   Working by the logic that H265 can support the same ammount of data at half the bitrate of H264.
                   NVDEC & NVENC compatable GPU required.
-                  This plugin will skip any files that are in the VP9 codec.`,
-  Version: '3.1',
+                  This plugin will skip any files that are in the VP9 codec.
+                  if you choose so, 1080p can be converted to 720p, if so then bitrate will be a little lower than half, 0.4 instead of0.5 multiplier`,
+  Version: '3.1.1',
   Tags: 'pre-processing,ffmpeg,video only,nvenc h265,configurable',
   Inputs: [{
     name: 'container',
@@ -46,6 +47,20 @@ const details = () => ({
 
                     \\nExample:\\n
                     4000`,
+  },
+  {
+      name: 'resize',
+      type: 'string',
+      defaultValue: 'no',
+      inputUI: {
+        type: 'text',
+      },
+      tooltip: `Specify if output file should be reduced to 720p from 1080p. Default is no.
+                    \\nExample:\\n
+                    yes
+
+                    \\nExample:\\n
+                    no`,
   },
   {
     name: 'enable_10bit',
@@ -163,6 +178,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   let extraArguments = '';
   let genpts = '';
   let bitrateSettings = '';
+  let bitRateMultiplier = 1.00;
+  let willBeResized = false;
   // Work out currentBitrate using "Bitrate = file size / (number of minutes * .0075)"
   // Used from here https://blog.frame.io/2017/03/06/calculate-video-bitrates/
   // eslint-disable-next-line no-bitwise
@@ -170,12 +187,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   // Use the same calculation used for currentBitrate but divide it in half to get targetBitrate.
   // Logic of h265 can be half the bitrate as h264 without losing quality.
   // eslint-disable-next-line no-bitwise
-  const targetBitrate = ~~(file.file_size / (duration * 0.0075) / 2);
+  targetBitrate = ~~(file.file_size / (duration * 0.0075));
   // Allow some leeway under and over the targetBitrate.
   // eslint-disable-next-line no-bitwise
-  const minimumBitrate = ~~(targetBitrate * 0.7);
+  minimumBitrate = ~~(targetBitrate * 0.7);
   // eslint-disable-next-line no-bitwise
-  const maximumBitrate = ~~(targetBitrate * 1.3);
+  maximumBitrate = ~~(targetBitrate * 1.3);
 
   // If Container .ts or .avi set genpts to fix unknown timestamp
   if (inputs.container.toLowerCase() === 'ts' || inputs.container.toLowerCase() === 'avi') {
@@ -251,7 +268,13 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     // If set to true then add 10bit argument
     extraArguments += '-pix_fmt p010le ';
   }
-
+  
+  // Check if b frame variable is false.  And adds a corresponding b frames argument to suppport older nvidia cards
+  if (inputs.enable_bframes === false) {
+  // If set to false then add b frames argument
+      extraArguments += '-b_ref_mode 0 ';
+  } 
+  
   // Check if b frame variable is true.
   if (inputs.enable_bframes === true) {
     // If set to true then add b frames argument
@@ -310,6 +333,27 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         CPU10 = true;
       }
 
+      //check if we need to convert from 1080p to 720p, and adjust targetbitrate accordinbly
+      if (file.ffProbeData.streams[i].codec_name !== 'hevc' && file.ffProbeData.streams[i].width > 1800 && file.ffProbeData.streams[i].width < 2000 && inputs.resize === 'yes') {
+        willBeResized = true;
+        bitRateMultiplier = 0.4;
+        response.infoLog += 'this is a 1080p and will be converted to 720p as set in the settings, Target bitrate adjusted to 0.4 multiplier instead of 0.5\n';
+      }
+      else {
+        bitRateMultiplier = 0.5;
+        response.infoLog += 'this is a 1080p or 720p and will not be converted to 720p as set in the settings, Target bitrate will be multiplied by the standard 0.5\n';
+      }
+      targetBitrate = targetBitrate * bitRateMultiplier;
+      minimumBitrate = ~~(targetBitrate * 0.7);
+      maximumBitrate = ~~(targetBitrate * 1.3);
+      
+      // If targetBitrate comes out as 0 then something has gone wrong and bitrates could not be calculcated.
+      if (targetBitrate === 0) {
+        response.processFile = false;
+        response.infoLog += 'Target bitrate could not be calculated. Skipping this plugin. \n';
+        return response;
+      }
+      
       // Increment videoIdx.
       videoIdx += 1;
     }
@@ -347,6 +391,12 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     response.preset = '-c:v vp8_cuvid';
   }
 
+  if (willBeResized === true) {
+    extraArguments += '-filter:v scale=1280:-1 ';
+  }
+  
+  //if you prefer vbr with default settings, change the line below to:
+  //response.preset += `${genpts}, -map 0 -c:v hevc_nvenc -rc:v vbr ${bitrateSettings} `
   response.preset += `${genpts}, -map 0 -c:v hevc_nvenc -cq:v 19 ${bitrateSettings} `
   + `-spatial_aq:v 1 -rc-lookahead:v 32 -c:a copy -c:s copy -max_muxing_queue_size 9999 ${extraArguments}`;
   response.processFile = true;
